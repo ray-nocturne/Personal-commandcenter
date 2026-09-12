@@ -98,3 +98,19 @@ export function fmtDate(date) {
 export function fmtTimeOnly(date) {
   return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
 }
+
+// Finds the location that was active at a given moment: the most recent
+// location check-in whose timestamp is at or before that moment.
+// `locations` must already be sorted newest-first (desc by ts).
+export function locationAtTime(locations, date) {
+  if (!date) return null;
+  const targetMs = date.getTime();
+  for (const loc of locations) {
+    const locMs = loc.ts?.toMillis ? loc.ts.toMillis() : loc.ts?.toDate?.()?.getTime();
+    if (locMs && locMs <= targetMs) return loc;
+  }
+  return null;
+}
+
+// Defaults mirror the original fixed schedule (in minutes), editable via Settings.
+export const DEFAULT_TIME_GOALS = { webco: 360, vilacation: 240, diamante: 240, pocket: 120 };

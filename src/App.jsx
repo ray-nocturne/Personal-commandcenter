@@ -3,18 +3,20 @@ import { Routes, Route, Link } from "react-router-dom";
 import RoadmapPage from "./RoadmapPage.jsx";
 import SessionsPage from "./SessionsPage.jsx";
 import ActivityPage from "./ActivityPage.jsx";
+import SettingsPage from "./SettingsPage.jsx";
 import Map, { Marker, Popup, NavigationControl } from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
 import {
-  getDailyBlocks, setDailyBlocks, getWeeklyBlocks,
   addNote, getNotesForVenture, getAllNotes,
   addLocation, getLocations,
   addSession, getSessions,
+  getTimeGoals,
 } from "./lib/firestoreService";
 import {
-  BLOCKS, ROLE_COLORS, VENTURES, TAGS, TAG_COLORS, DIVISIONS, TEAM_MEMBERS, DIVISION_COLORS,
-  todayKey, nowMinutes, greetingText, fmtFull, fmtTime,
+  ROLE_COLORS, VENTURES, TAGS, TAG_COLORS, DIVISIONS, TEAM_MEMBERS, DIVISION_COLORS,
+  DEFAULT_TIME_GOALS, todayKey, greetingText, fmtFull, fmtTime, locationAtTime,
 } from "./lib/constants";
+import { computeAutoDurations, sumDurationsByVenture, fmtDuration } from "./lib/timeTracking.js";
 import { EntryMeta } from "./EntryMeta.jsx";
 import { SessionRow, ActivityRow } from "./LogRows.jsx";
 import Background from "./Background.jsx";
@@ -24,15 +26,8 @@ import { auth } from "./lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import "./App.css";
 
-function currentLiveBlock() {
-  const m = nowMinutes();
-  return BLOCKS.find((b) => m >= b.start && m < b.end) || null;
-}
-
 function Dashboard() {
   const [now, setNow] = useState(new Date());
-  const [blockState, setBlockState] = useState({});
-  const [weeklyCounts, setWeeklyCounts] = useState({});
   const [ventureNotes, setVentureNotes] = useState({});
   const [allNotes, setAllNotes] = useState([]);
   const [locations, setLocations] = useState([]);
@@ -45,8 +40,7 @@ function Dashboard() {
   const [selectedLoc, setSelectedLoc] = useState(null);
   const [viewState, setViewState] = useState({ longitude: 110.3695, latitude: -7.7956, zoom: 12 });
   const [vilacationDivision, setVilacationDivision] = useState(DIVISIONS[0]);
-
-  const live = currentLiveBlock();
+  const [timeGoals, setTimeGoalsState] = useState(DEFAULT_TIME_GOALS);
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 30000);
@@ -54,26 +48,13 @@ function Dashboard() {
   }, []);
 
   const loadEverything = useCallback(async () => {
-    const today = todayKey();
-
-    const todayBlocks = await getDailyBlocks(today);
-    setBlockState(todayBlocks);
-
-    const days = [];
-    for (let i = 0; i < 7; i++) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      days.push(d.toISOString().slice(0, 10));
-    }
-    const weekly = await getWeeklyBlocks(days);
-    const counts = {};
-    BLOCKS.forEach((b) => { counts[b.id] = days.filter((d) => weekly[d]?.[b.id]).length; });
-    setWeeklyCounts(counts);
-
     const notesByVenture = {};
     for (const v of VENTURES) notesByVenture[v.id] = await getNotesForVenture(v.id, 3);
     setVentureNotes(notesByVenture);
     setAllNotes(await getAllNotes());
+
+    const goals = await getTimeGoals();
+    if (goals) setTimeGoalsState((g) => ({ ...g, ...goals }));
 
     const locs = await getLocations(30);
     setLocations(locs);
@@ -92,18 +73,6 @@ function Dashboard() {
     if (locations.length === 0) return;
     setViewState((vs) => ({ ...vs, longitude: locations[0].lng, latitude: locations[0].lat, zoom: 14 }));
   }, [locations]);
-
-  const toggleBlock = async (blockId) => {
-    const next = { ...blockState, [blockId]: !blockState[blockId] };
-    setBlockState(next);
-    await setDailyBlocks(todayKey(), next);
-    const days = [];
-    for (let i = 0; i < 7; i++) { const d = new Date(); d.setDate(d.getDate() - i); days.push(d.toISOString().slice(0, 10)); }
-    const weekly = await getWeeklyBlocks(days);
-    const counts = {};
-    BLOCKS.forEach((b) => { counts[b.id] = days.filter((d) => weekly[d]?.[b.id]).length; });
-    setWeeklyCounts(counts);
-  };
 
   const submitNote = async (ventureId, extra, text) => {
     if (!text.trim()) return;
@@ -132,10 +101,6 @@ function Dashboard() {
     );
   };
 
-  const doneCount = BLOCKS.filter((b) => blockState[b.id]).length;
-  const gaugePct = doneCount / BLOCKS.length;
-  const circumference = 220;
-
   const pieData = useMemo(() => {
     return VENTURES.map((v) => ({
       ...v,
@@ -144,16 +109,19 @@ function Dashboard() {
   }, [allNotes]);
   const pieTotal = pieData.reduce((s, d) => s + d.value, 0);
 
-  const locationByDate = useMemo(() => {
-    const map = {};
-    locations.forEach((l) => {
-      const d = l.ts?.toDate ? l.ts.toDate() : null;
-      if (!d) return;
-      const key = d.toISOString().slice(0, 10);
-      if (!map[key]) map[key] = l; // locations sorted desc by ts, so first = most recent that day
+  const loggedByVenture = useMemo(() => {
+    const today = todayKey();
+    const todays = allNotes.filter((n) => {
+      const d = n.ts?.toDate ? n.ts.toDate() : null;
+      return d && d.toISOString().slice(0, 10) === today;
     });
-    return map;
-  }, [locations]);
+    const asc = todays.slice().sort((a, b) => (a.ts?.toMillis?.() || 0) - (b.ts?.toMillis?.() || 0));
+    return sumDurationsByVenture(computeAutoDurations(asc));
+  }, [allNotes]);
+
+  const totalLoggedToday = Object.values(loggedByVenture).reduce((a, b) => a + b, 0);
+  const totalGoalToday = VENTURES.reduce((sum, v) => sum + (timeGoals[v.id] || 0), 0);
+  const goalCompletionPct = totalGoalToday > 0 ? Math.round((totalLoggedToday / totalGoalToday) * 100) : 0;
 
   if (loading) {
     return <div className="loading-screen">Booting system…</div>;
@@ -207,101 +175,64 @@ function Dashboard() {
             <div className="last-login">
               {lastLogin ? <>Last login: <b>{fmtFull(lastLogin)}</b></> : "First login — welcome to the system."}
             </div>
-            <div className={"live-badge" + (live ? "" : " off")}>
-              <span className="dot" />{live ? `LIVE NOW — ${live.name.toUpperCase()}` : "OFF-HOURS"}
-            </div>
-          </div>
-          <div className="gauge-wrap">
-            <div className="hud-ring" />
-            <div className="hud-ring rev" />
-            <svg width="128" height="128" viewBox="0 0 80 80">
-              <defs>
-                <linearGradient id="gaugeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#4FE0FF" /><stop offset="100%" stopColor="#B18CFF" />
-                </linearGradient>
-              </defs>
-              <circle className="gauge-track" cx="40" cy="40" r="35" />
-              <circle
-                className="gauge-fill" cx="40" cy="40" r="35"
-                style={{ strokeDashoffset: circumference - gaugePct * circumference }}
-              />
-            </svg>
-            <div className="gauge-label"><span className="num">{doneCount}/{BLOCKS.length}</span><span className="lbl">BLOCKS</span></div>
           </div>
         </header>
 
         <section>
           <p className="section-title">VENTURE PERFORMANCE</p>
           <div className="stats-row">
-            <div className="stat-card"><div className="stat-num">{doneCount}/{BLOCKS.length}</div><div className="stat-label">BLOCKS DONE TODAY</div></div>
-            <div className="stat-card"><div className="stat-num">{Object.values(weeklyCounts).reduce((a, b) => a + b, 0)}/{BLOCKS.length * 7}</div><div className="stat-label">BLOCKS DONE THIS WEEK</div></div>
+            <div className="stat-card"><div className="stat-num">{fmtDuration(totalLoggedToday)}</div><div className="stat-label">TIME LOGGED TODAY</div></div>
+            <div className="stat-card"><div className="stat-num">{goalCompletionPct}%</div><div className="stat-label">GOAL COMPLETION TODAY</div></div>
             <div className="stat-card"><div className="stat-num">{allNotes.length}</div><div className="stat-label">TOTAL ACTIVITY LOGS</div></div>
             <div className="stat-card"><div className="stat-num">{sessions.length}</div><div className="stat-label">SESSIONS LOGGED</div></div>
           </div>
-          <div className="perf-grid">
-            <div className="card">
-              <p className="card-title">ACTIVITY DISTRIBUTION (ALL TIME)</p>
-              <div className="pie-wrap">
-                <svg width="140" height="140" viewBox="0 0 140 140">
-                  {pieTotal === 0 ? (
-                    <circle cx="70" cy="70" r="54" fill="none" stroke="#152230" strokeWidth="16" />
-                  ) : (
-                    (() => {
-                      let cumulative = 0;
-                      const r = 54, cx = 70, cy = 70, circ = 2 * Math.PI * r;
-                      return pieData.filter((d) => d.value > 0).map((d) => {
-                        const len = (d.value / pieTotal) * circ;
-                        const el = (
-                          <circle key={d.id} cx={cx} cy={cy} r={r} fill="none" stroke={d.accent} strokeWidth="16"
-                            strokeDasharray={`${len} ${circ - len}`} strokeDashoffset={-cumulative}
-                            transform={`rotate(-90 ${cx} ${cy})`} opacity="0.92" />
-                        );
-                        cumulative += len;
-                        return el;
-                      });
-                    })()
-                  )}
-                </svg>
-                <ul className="pie-legend">
-                  {pieTotal === 0
-                    ? <li style={{ color: "#37505F", fontStyle: "italic" }}>No activity logged yet.</li>
-                    : pieData.map((d) => (
-                      <li key={d.id}><span className="swatch" style={{ background: d.accent }} />{d.name.replace("Ray - ", "")}
-                        <span className="pct">{pieTotal ? Math.round((d.value / pieTotal) * 100) : 0}%</span></li>
-                    ))}
-                </ul>
-              </div>
-            </div>
-            <div className="card">
-              <p className="card-title">LAST 7 DAYS CONSISTENCY</p>
-              <div className="bar-rows">
-                {BLOCKS.map((b) => {
-                  const pct = Math.round(((weeklyCounts[b.id] || 0) / 7) * 100);
-                  return (
-                    <div className="bar-row" key={b.id}>
-                      <div className="bar-head"><b>{b.name}</b><span>{weeklyCounts[b.id] || 0}/7 days · {pct}%</span></div>
-                      <div className="bar-track"><div className="bar-fill" style={{ width: `${pct}%`, background: b.color, boxShadow: `0 0 8px ${b.color}77` }} /></div>
-                    </div>
-                  );
-                })}
-              </div>
+          <div className="card">
+            <p className="card-title">ACTIVITY DISTRIBUTION (ALL TIME)</p>
+            <div className="pie-wrap">
+              <svg width="140" height="140" viewBox="0 0 140 140">
+                {pieTotal === 0 ? (
+                  <circle cx="70" cy="70" r="54" fill="none" stroke="#152230" strokeWidth="16" />
+                ) : (
+                  (() => {
+                    let cumulative = 0;
+                    const r = 54, cx = 70, cy = 70, circ = 2 * Math.PI * r;
+                    return pieData.filter((d) => d.value > 0).map((d) => {
+                      const len = (d.value / pieTotal) * circ;
+                      const el = (
+                        <circle key={d.id} cx={cx} cy={cy} r={r} fill="none" stroke={d.accent} strokeWidth="16"
+                          strokeDasharray={`${len} ${circ - len}`} strokeDashoffset={-cumulative}
+                          transform={`rotate(-90 ${cx} ${cy})`} opacity="0.92" />
+                      );
+                      cumulative += len;
+                      return el;
+                    });
+                  })()
+                )}
+              </svg>
+              <ul className="pie-legend">
+                {pieTotal === 0
+                  ? <li style={{ color: "#37505F", fontStyle: "italic" }}>No activity logged yet.</li>
+                  : pieData.map((d) => (
+                    <li key={d.id}><span className="swatch" style={{ background: d.accent }} />{d.name.replace("Ray - ", "")}
+                      <span className="pct">{pieTotal ? Math.round((d.value / pieTotal) * 100) : 0}%</span></li>
+                  ))}
+              </ul>
             </div>
           </div>
         </section>
 
         <section>
-          <p className="section-title">BLOCKS TODAY</p>
-          <div className="blocks">
-            {BLOCKS.map((b) => {
-              const done = !!blockState[b.id];
-              const isLive = live?.id === b.id;
+          <p className="section-title">TODAY'S PROGRESS</p>
+          <div className="progress-grid">
+            {VENTURES.map((v) => {
+              const logged = loggedByVenture[v.id] || 0;
+              const goal = timeGoals[v.id] || 0;
+              const pct = goal > 0 ? Math.min(100, Math.round((logged / goal) * 100)) : 0;
               return (
-                <div key={b.id} className={"block" + (done ? " done" : "") + (isLive ? " live" : "")} onClick={() => toggleBlock(b.id)}>
-                  <div className="corner tl" /><div className="corner br" />
-                  {isLive && <div className="block-live-tag"><span className="dot" />LIVE</div>}
-                  <div className="block-time">{b.time}</div>
-                  <div className="block-name">{b.name}</div>
-                  <div className="block-hours">{b.hours}</div>
+                <div className="progress-card" key={v.id} style={{ "--v-accent": v.accent }}>
+                  <div className="progress-card-name">{v.name}</div>
+                  <div className="progress-card-value">{fmtDuration(logged)} <span className="progress-card-goal">/ {fmtDuration(goal)}</span></div>
+                  <div className="bar-track"><div className="bar-fill" style={{ width: `${pct}%`, background: v.accent, boxShadow: `0 0 8px ${v.accent}77` }} /></div>
                 </div>
               );
             })}
@@ -413,8 +344,7 @@ function Dashboard() {
               <ul className="session-list">
                 {sessions.slice(0, 5).map((s, i) => {
                   const d = s.ts?.toDate ? s.ts.toDate() : null;
-                  const key = d ? d.toISOString().slice(0, 10) : null;
-                  const loc = key ? locationByDate[key] : null;
+                  const loc = locationAtTime(locations, d);
                   return <SessionRow key={i} date={d} isCurrent={i === 0} loc={loc} />;
                 })}
               </ul>
@@ -448,6 +378,7 @@ function Dashboard() {
         <div className="footer-brand">RAY<span>.OS</span> — v1.0</div>
         <div className="footer-status">
           <span className="dot" />SYSTEM ONLINE · SAVED TO FIRESTORE
+          <Link to="/settings" className="logout-btn">Settings</Link>
           <button className="logout-btn" onClick={() => { sessionStorage.removeItem("rayos_checked_in"); signOut(auth); }}>Log out</button>
         </div>
       </footer>
@@ -484,6 +415,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Dashboard />} />
+      <Route path="/settings" element={<SettingsPage />} />
       <Route path="/roadmap/:ventureId" element={<RoadmapPage />} />
       <Route path="/sessions" element={<SessionsPage />} />
       <Route path="/activity" element={<ActivityPage />} />

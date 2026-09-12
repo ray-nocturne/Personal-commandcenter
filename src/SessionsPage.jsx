@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { getSessions, getLocations } from "./lib/firestoreService";
+import { locationAtTime } from "./lib/constants";
 import { SessionRow } from "./LogRows.jsx";
 import Background from "./Background.jsx";
 import "./App.css";
@@ -19,17 +20,6 @@ export default function SessionsPage() {
       setLoading(false);
     })();
   }, []);
-
-  const locationByDate = useMemo(() => {
-    const map = {};
-    locations.forEach((l) => {
-      const d = l.ts?.toDate ? l.ts.toDate() : null;
-      if (!d) return;
-      const key = d.toISOString().slice(0, 10);
-      if (!map[key]) map[key] = l;
-    });
-    return map;
-  }, [locations]);
 
   return (
     <div className="ops-deck">
@@ -52,8 +42,7 @@ export default function SessionsPage() {
               <ul className="session-list">
                 {sessions.map((s, i) => {
                   const d = s.ts?.toDate ? s.ts.toDate() : null;
-                  const key = d ? d.toISOString().slice(0, 10) : null;
-                  const loc = key ? locationByDate[key] : null;
+                  const loc = locationAtTime(locations, d);
                   return <SessionRow key={s.id || i} date={d} isCurrent={i === 0} loc={loc} />;
                 })}
               </ul>
